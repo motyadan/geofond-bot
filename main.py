@@ -59,7 +59,7 @@ def start(message):
         markup.add(types.KeyboardButton("Сделать фотоотчёт"))
     bot.send_message(
         message.chat.id,
-        "Привет! Ты можешь отправить фотоотчет, если ты авторизован!",
+        "Привет! Ты можешь отправить фотоотчёт, если ты авторизован!",
         reply_markup=markup
     )
 
@@ -86,12 +86,43 @@ def add_user_by_text(message):
 
 @bot.message_handler(func=lambda message: message.text == 'Сделать фотоотчёт')
 def start_album(message):
+    bot.send_message(message.chat.id, 'Введите комментарий к фотоотчёту:')
+    bot.register_next_step_handler(message, handle_comment)
+
+# Обработчик комментария
+def handle_comment(message):
+    user_id = str(message.from_user.id)
+
+    # Проверка, разрешён ли пользователь
+    if not is_user_allowed(user_id):
+        bot.reply_to(message, "Извините, у вас нет прав на отправку фотографий.")
+        return
+
+    # Сохраняем комментарий
+    comment = message.text
     bot.send_message(message.chat.id, 'Отправьте ваш фотоотчёт (можно в виде альбома)')
-    bot.register_next_step_handler(message, handle_photo_album)
+    bot.register_next_step_handler(message, lambda msg: handle_photo_album(msg, comment))
+
+def send_media_group_with_caption(photo_list, user_name, comment):
+    """
+    Отправляет медиа группу с подписью в канал.
+    """
+    media_files = []
+    
+    for i, msg in enumerate(photo_list):
+        if i == 0:  # Подпись только для первого фото
+            media_files.append(types.InputMediaPhoto(
+                media=msg.photo[-1].file_id, 
+                caption=f"Фотоотчёт от {user_name}\nКомментарий: {comment}"
+            ))
+        else:
+            media_files.append(types.InputMediaPhoto(media=msg.photo[-1].file_id))
+    
+    # Отправка медиа группы
+    bot.send_media_group(CHANNEL_ID, media_files)
 
 # Обработчик фотографий (одиночных и альбомов)
-@bot.message_handler(content_types=['photo'])
-def handle_photo_album(message):
+def handle_photo_album(message, comment):
     user_id = str(message.from_user.id)
 
     # Проверка, разрешён ли пользователь
@@ -107,22 +138,28 @@ def handle_photo_album(message):
 
         # Если получено минимум 2 фото
         if len(media_groups[message.media_group_id]) >= 2:
-            media = []
-            for msg in media_groups[message.media_group_id]:
-                media.append(telebot.types.InputMediaPhoto(msg.photo[-1].file_id))
-            
-            # Отправка альбома
-            bot.send_media_group(CHANNEL_ID, media)
-            bot.send_message(CHANNEL_ID, f'Фотоотчёт от {user_name}')
+            # Отправляем альбом
+            send_media_group_with_caption(media_groups[message.media_group_id], user_name, comment)
+
             bot.send_message(message.chat.id, 'Фотоотчёт отправлен в канал')
 
             # Удаляем фото из списка
             del media_groups[message.media_group_id]
     else:
         # Если это одиночное фото
-        bot.send_photo(CHANNEL_ID, message.photo[-1].file_id)
-        bot.send_message(CHANNEL_ID, f'Фото от {user_name}')
+        caption = f"Фото от {user_name}\nКомментарий: {comment}"
+        bot.send_photo(CHANNEL_ID, message.photo[-1].file_id, caption=caption)
         bot.send_message(message.chat.id, "Ваше фото отправлено в канал!")
+
+# Обработчик медиагрупп
+@bot.message_handler(content_types=['photo'])
+def handle_media_group(message):
+    if message.media_group_id:
+        # Если это часть альбома, сохраняем в словарь
+        media_groups[message.media_group_id].append(message)
+    else:
+        # Если это одиночное фото, обрабатываем его
+        handle_photo_album(message, "")
 
 # Запуск бота
 bot.polling(none_stop=True)
