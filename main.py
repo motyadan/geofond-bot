@@ -3,6 +3,8 @@ import json
 from telebot import types
 from collections import defaultdict
 import time
+import os
+from datetime import datetime
 
 # Ваш токен бота и ID канала
 TOKEN = '8155202361:AAG1oFGPtAfwMRuGhh5ZUg4bzv3VOmu9SMY'
@@ -121,6 +123,11 @@ def handle_comment(message):
         user_id = str(message.from_user.id)
         user_data[user_id]["comment"] = message.text
 
+        # Создаем папку для отчета
+        folder_name = f"{message.text}_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
+        os.makedirs(folder_name, exist_ok=True)
+        user_data[user_id]["folder"] = folder_name
+
         # Добавляем кнопку "Завершить отчет"
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
         markup.add(types.KeyboardButton("Завершить отчет"))
@@ -141,7 +148,15 @@ def handle_photo(message):
         return
 
     # Сохраняем фото
-    user_data[user_id]["photos"].append(message.photo[-1].file_id)
+    photo_id = message.photo[-1].file_id
+    user_data[user_id]["photos"].append(photo_id)
+
+    # Скачиваем фото и сохраняем в папку
+    file_info = bot.get_file(photo_id)
+    downloaded_file = bot.download_file(file_info.file_path)
+    folder_name = user_data[user_id]["folder"]
+    with open(f"{folder_name}/{photo_id}.jpg", 'wb') as new_file:
+        new_file.write(downloaded_file)
 
 # Обработчик кнопки "Завершить отчет"
 @bot.message_handler(func=lambda message: message.text == 'Завершить отчет')
