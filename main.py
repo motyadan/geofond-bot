@@ -7,7 +7,7 @@ import os
 from datetime import datetime
 
 # Ваш токен бота и ID канала
-TOKEN = '8155202361:AAG1oFGPtAfwMRuGhh5ZUg4bzv3VOmu9SMY'
+TOKEN = '8155202361......'
 CHANNEL_ID = '-1002495576009'
 bot = telebot.TeleBot(TOKEN)
 
