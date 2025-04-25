@@ -6,9 +6,11 @@ import time
 import os
 from datetime import datetime
 
-# Ваш токен бота и ID канала
-TOKEN = '8155202361.............'
+# Конфигурационные переменные
+TOKEN = '8155202...........'
 CHANNEL_ID = '-1002495576009'
+PHOTOS_BASE_PATH = 'reports'  # Базовый путь для сохранения фотоотчётов
+
 bot = telebot.TeleBot(TOKEN)
 
 # Файлы с данными
@@ -17,6 +19,9 @@ ADMINS_FILE = 'admins.txt'
 
 # Словарь для хранения данных пользователей
 user_data = defaultdict(lambda: {"photos": [], "comment": "", "folder": ""})
+
+# Создаём базовую директорию, если её нет
+os.makedirs(PHOTOS_BASE_PATH, exist_ok=True)
 
 # --- Утилиты ---
 
@@ -117,9 +122,10 @@ def handle_comment(message):
     user_id = str(message.from_user.id)
     comment = message.text
     user_data[user_id]["comment"] = comment
-    folder = f"{comment}_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
-    os.makedirs(folder, exist_ok=True)
-    user_data[user_id]["folder"] = folder
+    folder_name = f"{comment}_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
+    folder_path = os.path.join(PHOTOS_BASE_PATH, folder_name)
+    os.makedirs(folder_path, exist_ok=True)
+    user_data[user_id]["folder"] = folder_path
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("Завершить отчет", callback_data="finish"))
     kb.add(types.InlineKeyboardButton("Отменить отчет", callback_data="cancel"))
@@ -148,7 +154,7 @@ def finish_report(call):
         return send_main_menu(call.message.chat.id, call.from_user.id)
     photos = user_data[uid]["photos"]
     comment = user_data[uid]["comment"]
-    folder = user_data[uid]["folder"]
+    folder_path = user_data[uid]["folder"]
     name = get_user_name(uid)
     if not photos:
         bot.send_message(call.message.chat.id, "Никаких фото не было отправлено.")
@@ -157,7 +163,7 @@ def finish_report(call):
     for fid in photos:
         file_info = bot.get_file(fid)
         data = bot.download_file(file_info.file_path)
-        with open(f"{folder}/{fid}.jpg", 'wb') as f:
+        with open(f"{folder_path}/{fid}.jpg", 'wb') as f:
             f.write(data)
     # Отправка фото в канале: открываем файлы без закрытия до после отправки
     for i in range(0, len(photos), 10):
@@ -165,7 +171,7 @@ def finish_report(call):
         media = []
         open_files = []
         for idx, fid in enumerate(group):
-            path = f"{folder}/{fid}.jpg"
+            path = f"{folder_path}/{fid}.jpg"
             f = open(path, 'rb')
             open_files.append(f)
             if idx == 0:
