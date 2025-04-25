@@ -7,7 +7,7 @@ import os
 from datetime import datetime
 
 # Конфигурационные переменные
-TOKEN = '8155202361:AAF0YKiQVrFU68AnZmuMpraSKtGKZuKBc1E'
+TOKEN = '815520............'
 CHANNEL_ID = '-1002495576009'
 PHOTOS_BASE_PATH = 'reports'  # Базовый путь для сохранения фотоотчётов
 
