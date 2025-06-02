@@ -1,29 +1,41 @@
 import telebot
 import json
+import os
+import re
+import io
+import threading
+import time
+from datetime import datetime
 from telebot import types
 from collections import defaultdict
-import time
-import os
-from datetime import datetime
 
-# Конфигурационные переменные
-TOKEN = '8155202...........'
-CHANNEL_ID = '-1002495576009'
-PHOTOS_BASE_PATH = 'reports'  # Базовый путь для сохранения фотоотчётов
+# ================== НАСТРОЙКИ ==================
 
-bot = telebot.TeleBot(TOKEN)
+TOKEN = '815520.......'
+CHANNEL_ID = '-1002599464119'  # ID канала для пересылки медиагрупп
 
 # Файлы с данными
 ALLOWED_USERS_FILE = 'allowed_users.json'
 ADMINS_FILE = 'admins.txt'
 
-# Словарь для хранения данных пользователей
-user_data = defaultdict(lambda: {"photos": [], "comment": "", "folder": ""})
+# Базовая папка для локального хранения отчётов
+LOCAL_REPORTS_BASE = 'reports'
 
-# Создаём базовую директорию, если её нет
-os.makedirs(PHOTOS_BASE_PATH, exist_ok=True)
+# Временное хранилище данных отчётов
+# Структура: user_data[chat_id_str] = {"photos": [file_id, ...], "comment": "текст"}
+user_data = defaultdict(lambda: {"photos": [], "comment": ""})
 
-# --- Утилиты ---
+
+# ================================================
+# ======== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ================
+# ================================================
+
+def sanitize_for_path(name: str) -> str:
+    """
+    Заменяет в имени всё, что не подходит для пути:
+    запрещённые символы \ / : * ? " < > | # на подчёркивание.
+    """
+    return re.sub(r'[\\/:*?"<>|#]', '_', name).strip()
 
 def get_admins():
     try:
@@ -32,7 +44,6 @@ def get_admins():
     except FileNotFoundError:
         return set()
 
-
 def get_allowed_users():
     try:
         with open(ALLOWED_USERS_FILE, 'r', encoding='utf-8') as f:
@@ -40,25 +51,50 @@ def get_allowed_users():
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
 
-
 def save_allowed_users(users):
     with open(ALLOWED_USERS_FILE, 'w', encoding='utf-8') as f:
         json.dump(users, f, ensure_ascii=False, indent=4)
 
-
 def is_admin(user_id):
     return str(user_id) in get_admins()
-
 
 def is_user_allowed(user_id):
     return str(user_id) in get_allowed_users()
 
-
 def get_user_name(user_id):
     users = get_allowed_users()
-    return users.get(str(user_id), "Неизвестный пользователь")
+    return users.get(str(user_id), "Неизвестный_пользователь")
 
-# --- Меню ---
+def save_photos_thread(photos, safe_user_name, safe_comment, chat_id_str, timestamp):
+    """
+    Функция, исполняемая в отдельном потоке:
+    скачивает фото из Telegram и сохраняет их в локальный каталог.
+    """
+    report_folder = os.path.join(LOCAL_REPORTS_BASE, safe_user_name, safe_comment)
+    os.makedirs(report_folder, exist_ok=True)
+
+    for idx, file_id in enumerate(photos, start=1):
+        try:
+            file_info = bot.get_file(file_id)
+            file_path = file_info.file_path
+            photo_data = bot.download_file(file_path)
+            filename = f"{chat_id_str}-{timestamp}-{idx}.jpg"
+            filepath = os.path.join(report_folder, filename)
+            with open(filepath, 'wb') as f:
+                f.write(photo_data)
+        except Exception as e:
+            # В случае ошибки сохраняем лог, но продолжаем
+            print(f"Ошибка при сохранении {file_id}: {e}")
+
+
+
+# ================================================
+# =============== ОСНОВНОЙ КОД БОТА ==============
+# ================================================
+
+bot = telebot.TeleBot(TOKEN)
+
+# --- МЕНЮ ---
 
 def send_main_menu(chat_id, user_id):
     markup = types.InlineKeyboardMarkup()
@@ -72,131 +108,149 @@ def send_main_menu(chat_id, user_id):
 def start(message):
     send_main_menu(message.chat.id, message.from_user.id)
 
-# --- Добавление пользователя ---
+
+# --- ДОБАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯ ---
 
 @bot.callback_query_handler(func=lambda call: call.data == 'add')
 def add_callback(call):
-    user_id = call.from_user.id
-    if not is_admin(user_id):
+    if not is_admin(call.from_user.id):
         bot.answer_callback_query(call.id, "Нет прав!")
-        return send_main_menu(call.message.chat.id, user_id)
-    msg = bot.send_message(call.message.chat.id,
-                           "Введите ID и имя пользователя в формате: chat_id имя",
-                           reply_markup=types.ForceReply(selective=True))
+        return send_main_menu(call.message.chat.id, call.from_user.id)
+    msg = bot.send_message(
+        call.message.chat.id,
+        "Введите ID и имя пользователя в формате: chat_id имя",
+        reply_markup=types.ForceReply(selective=True)
+    )
     bot.register_next_step_handler(msg, add_user_by_text)
 
-
 def add_user_by_text(message):
-    user_id = message.from_user.id
-    if not is_admin(user_id):
+    if not is_admin(message.from_user.id):
         bot.reply_to(message, "Нет прав на добавление!")
-    else:
-        try:
-            chat_id, name = message.text.split(maxsplit=1)
-            users = get_allowed_users()
-            users[chat_id] = name
-            save_allowed_users(users)
-            bot.reply_to(message, f"Пользователь {name} добавлен.")
-        except ValueError:
-            bot.reply_to(message, "Ошибка формата. Используйте: chat_id имя")
+        return
+    try:
+        chat_id, name = message.text.split(maxsplit=1)
+        users = get_allowed_users()
+        users[chat_id] = name
+        save_allowed_users(users)
+        bot.reply_to(message, f"Пользователь '{name}' добавлен.")
+    except ValueError:
+        bot.reply_to(message, "Ошибка формата. Используйте: chat_id имя")
     time.sleep(1)
-    send_main_menu(message.chat.id, user_id)
+    send_main_menu(message.chat.id, message.from_user.id)
 
-# --- Начало отчёта ---
+
+# --- НАЧАЛО ФОРМИРОВАНИЯ ОТЧЁТА ---
 
 @bot.callback_query_handler(func=lambda call: call.data == 'report')
 def report_callback(call):
-    user_id = call.from_user.id
-    if not is_user_allowed(user_id):
-        bot.answer_callback_query(call.id, "Нет прав!")
-        return send_main_menu(call.message.chat.id, user_id)
-    uid = str(user_id)
-    user_data[uid] = {"photos": [], "comment": "", "folder": ""}
-    msg = bot.send_message(call.message.chat.id,
-                           "Какой объект (комментарий)?",
-                           reply_markup=types.ForceReply(selective=True))
+    if not is_user_allowed(call.from_user.id):
+        bot.answer_callback_query(call.id, "Нет доступа!")
+        return send_main_menu(call.message.chat.id, call.from_user.id)
+
+    uid = str(call.from_user.id)
+    user_data[uid] = {"photos": [], "comment": ""}
+    msg = bot.send_message(
+        call.message.chat.id,
+        "Какой объект (комментарий)?",
+        reply_markup=types.ForceReply(selective=True)
+    )
     bot.register_next_step_handler(msg, handle_comment)
 
-
 def handle_comment(message):
-    user_id = str(message.from_user.id)
-    comment = message.text
-    user_data[user_id]["comment"] = comment
-    folder_name = f"{comment}_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
-    folder_path = os.path.join(PHOTOS_BASE_PATH, folder_name)
-    os.makedirs(folder_path, exist_ok=True)
-    user_data[user_id]["folder"] = folder_path
+    uid = str(message.from_user.id)
+    user_data[uid]["comment"] = message.text
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("Завершить отчет", callback_data="finish"))
     kb.add(types.InlineKeyboardButton("Отменить отчет", callback_data="cancel"))
-    bot.send_message(message.chat.id,
-                     'Теперь отправьте фото. Когда закончите, нажмите "Завершить отчет".',
-                     reply_markup=kb)
+    bot.send_message(
+        message.chat.id,
+        'Теперь отправьте фото. Когда закончите, нажмите "Завершить отчет".',
+        reply_markup=kb
+    )
 
-# --- Приём фото (только сохранение ID) ---
+# --- ПРИЁМ ФОТО ОТ ПОЛЬЗОВАТЕЛЯ ---
 
 @bot.message_handler(content_types=['photo'])
 def handle_photo(message):
     uid = str(message.from_user.id)
     if not is_user_allowed(message.from_user.id):
-        return bot.reply_to(message, "Нет прав на отправку фото.")
-    user_data[uid]["photos"].append(message.photo[-1].file_id)
+        return bot.reply_to(message, "Нет доступа для отправки фото.")
+    file_id = message.photo[-1].file_id
+    user_data[uid]["photos"].append(file_id)
 
-
-# --- Завершение отчёта ---
+# --- ЗАВЕРШЕНИЕ ОТЧЁТА: ПЕРЕСЫЛКА + ОТДЕЛЬНЫЙ ПОТОК ДЛЯ СОХРАНЕНИЯ ---
 
 @bot.callback_query_handler(func=lambda call: call.data == 'finish')
 def finish_report(call):
-    # Подтверждаем callback сразу
     bot.answer_callback_query(call.id)
     uid = str(call.from_user.id)
     if not is_user_allowed(call.from_user.id):
         return send_main_menu(call.message.chat.id, call.from_user.id)
+
     photos = user_data[uid]["photos"]
-    comment = user_data[uid]["comment"]
-    folder_path = user_data[uid]["folder"]
-    name = get_user_name(uid)
+    comment_raw = user_data[uid]["comment"]
+    name_raw = get_user_name(uid)
+    chat_id_str = uid  # для формирования имён файлов
+
     if not photos:
-        bot.send_message(call.message.chat.id, "Никаких фото не было отправлено.")
+        bot.send_message(call.message.chat.id, "Вы не отправили ни одной фотографии.")
         return
-    # Скачиваем фото
-    for fid in photos:
-        file_info = bot.get_file(fid)
-        data = bot.download_file(file_info.file_path)
-        with open(f"{folder_path}/{fid}.jpg", 'wb') as f:
-            f.write(data)
-    # Отправка фото в канале: открываем файлы без закрытия до после отправки
-    for i in range(0, len(photos), 10):
-        group = photos[i:i+10]
-        media = []
-        open_files = []
-        for idx, fid in enumerate(group):
-            path = f"{folder_path}/{fid}.jpg"
-            f = open(path, 'rb')
-            open_files.append(f)
-            if idx == 0:
-                media.append(types.InputMediaPhoto(f, caption=f"Фотоотчёт от {name}\nКомментарий: {comment}"))
+
+    # --------------------------------------------------------
+    # 1) Пересылаем медиагруппами в канал (по 10 фото в группе)
+    # --------------------------------------------------------
+
+    caption = f"<b>Фотоотчёт от {name_raw}</b>\nКомментарий: {comment_raw}"
+    chunk_size = 10
+
+    for i in range(0, len(photos), chunk_size):
+        group = photos[i:i + chunk_size]
+        media_group = []
+        for j, file_id in enumerate(group):
+            if j == 0:
+                media_group.append(
+                    types.InputMediaPhoto(media=file_id, caption=caption, parse_mode='HTML')
+                )
             else:
-                media.append(types.InputMediaPhoto(f))
-        bot.send_media_group(CHANNEL_ID, media)
-        # Закрываем файлы после отправки
-        for f in open_files:
-            f.close()
-    # Очистка данных и уведомление
-    user_data[uid] = {"photos": [], "comment": "", "folder": ""}
-    bot.send_message(call.message.chat.id, "Фотоотчёт успешно отправлен в канал!")
+                media_group.append(types.InputMediaPhoto(media=file_id))
+        bot.send_media_group(CHANNEL_ID, media_group)
+
+    # --------------------------------------------------------
+    # 2) Запускаем поток для скачивания и сохранения фото
+    # --------------------------------------------------------
+
+    safe_user_name = sanitize_for_path(name_raw)
+    safe_comment = sanitize_for_path(comment_raw)
+    timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+
+    # Копируем список, чтобы очистить пользовательские данные и не блокировать основной поток
+    photos_copy = list(photos)
+
+    # Очищаем данные пользователя, чтобы он мог начать новый отчёт сразу
+    user_data[uid] = {"photos": [], "comment": ""}
+
+    # Запускаем поток
+    t = threading.Thread(
+        target=save_photos_thread,
+        args=(photos_copy, safe_user_name, safe_comment, chat_id_str, timestamp),
+        daemon=True
+    )
+    t.start()
+
+    bot.send_message(call.message.chat.id, "Отчёт отправлен в канал, сохранение началось в фоне.")
     send_main_menu(call.message.chat.id, call.from_user.id)
 
-# --- Отмена отчёта ---
+# --- ОТМЕНА ОТЧЁТА ---
 
 @bot.callback_query_handler(func=lambda call: call.data == 'cancel')
 def cancel_report(call):
-    bot.answer_callback_query(call.id, "Отчет отменён.")
-    uid = str(call.from_user.id)
-    user_data[uid] = {"photos": [], "comment": "", "folder": ""}
+    bot.answer_callback_query(call.id, "Отчёт отменён.")
+    user_data[str(call.from_user.id)] = {"photos": [], "comment": ""}
     send_main_menu(call.message.chat.id, call.from_user.id)
 
-# --- Запуск бота ---
+# --- ЗАПУСК БОТА ---
 
 if __name__ == '__main__':
+    os.makedirs(LOCAL_REPORTS_BASE, exist_ok=True)
     bot.polling(none_stop=True)
+
