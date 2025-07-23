@@ -2,39 +2,26 @@ import telebot
 import json
 import os
 import re
-import io
 import threading
 import time
 from datetime import datetime
 from telebot import types
 from collections import defaultdict
 
-# ================== НАСТРОЙКИ ==================
+# ============ НАСТРОЙКИ ============
 
-TOKEN = '815520.......'
-CHANNEL_ID = '-1002599464119'  # ID канала для пересылки медиагрупп
+TOKEN = os.getenv('TOKEN')
+CHANNEL_ID = '-1002495576009'
 
-# Файлы с данными
 ALLOWED_USERS_FILE = 'allowed_users.json'
 ADMINS_FILE = 'admins.txt'
-
-# Базовая папка для локального хранения отчётов
 LOCAL_REPORTS_BASE = 'reports'
 
-# Временное хранилище данных отчётов
-# Структура: user_data[chat_id_str] = {"photos": [file_id, ...], "comment": "текст"}
 user_data = defaultdict(lambda: {"photos": [], "comment": ""})
 
-
-# ================================================
-# ======== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ================
-# ================================================
+# ============ ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ============
 
 def sanitize_for_path(name: str) -> str:
-    """
-    Заменяет в имени всё, что не подходит для пути:
-    запрещённые символы \ / : * ? " < > | # на подчёркивание.
-    """
     return re.sub(r'[\\/:*?"<>|#]', '_', name).strip()
 
 def get_admins():
@@ -66,13 +53,8 @@ def get_user_name(user_id):
     return users.get(str(user_id), "Неизвестный_пользователь")
 
 def save_photos_thread(photos, safe_user_name, safe_comment, chat_id_str, timestamp):
-    """
-    Функция, исполняемая в отдельном потоке:
-    скачивает фото из Telegram и сохраняет их в локальный каталог.
-    """
     report_folder = os.path.join(LOCAL_REPORTS_BASE, safe_user_name, safe_comment)
     os.makedirs(report_folder, exist_ok=True)
-
     for idx, file_id in enumerate(photos, start=1):
         try:
             file_info = bot.get_file(file_id)
@@ -83,50 +65,54 @@ def save_photos_thread(photos, safe_user_name, safe_comment, chat_id_str, timest
             with open(filepath, 'wb') as f:
                 f.write(photo_data)
         except Exception as e:
-            # В случае ошибки сохраняем лог, но продолжаем
             print(f"Ошибка при сохранении {file_id}: {e}")
 
-
-
-# ================================================
-# =============== ОСНОВНОЙ КОД БОТА ==============
-# ================================================
+# ============ ОСНОВНОЙ КОД БОТА ============
 
 bot = telebot.TeleBot(TOKEN)
 
-# --- МЕНЮ ---
-
 def send_main_menu(chat_id, user_id):
-    markup = types.InlineKeyboardMarkup()
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    buttons = []
     if is_admin(user_id):
-        markup.add(types.InlineKeyboardButton("Добавить", callback_data="add"))
+        buttons.append(types.KeyboardButton("Админ панель"))
     if is_user_allowed(user_id):
-        markup.add(types.InlineKeyboardButton("Сделать фотоотчёт", callback_data="report"))
+        buttons.append(types.KeyboardButton("Сделать фотоотчёт"))
+    markup.add(*buttons)
     bot.send_message(chat_id, "Выберите действие:", reply_markup=markup)
 
 @bot.message_handler(commands=['start'])
 def start(message):
     send_main_menu(message.chat.id, message.from_user.id)
 
+# ============ АДМИН-ПАНЕЛЬ ============
 
-# --- ДОБАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯ ---
+@bot.message_handler(func=lambda msg: msg.text == "Админ панель")
+def admin_panel(message):
+    if not is_admin(message.from_user.id):
+        return bot.reply_to(message, "У вас нет прав доступа.")
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add("Добавить пользователя", "Список пользователей")
+    markup.add("Удалить пользователя", "Назад")
+    bot.send_message(message.chat.id, "🔧 Админ панель:", reply_markup=markup)
 
-@bot.callback_query_handler(func=lambda call: call.data == 'add')
-def add_callback(call):
-    if not is_admin(call.from_user.id):
-        bot.answer_callback_query(call.id, "Нет прав!")
-        return send_main_menu(call.message.chat.id, call.from_user.id)
+@bot.message_handler(func=lambda msg: msg.text == "Назад")
+def back_to_main(message):
+    send_main_menu(message.chat.id, message.from_user.id)
+
+@bot.message_handler(func=lambda msg: msg.text == "Добавить пользователя")
+def add_user_request(message):
+    if not is_admin(message.from_user.id):
+        return bot.reply_to(message, "У вас нет прав на добавление пользователей.")
     msg = bot.send_message(
-        call.message.chat.id,
-        "Введите ID и имя пользователя в формате: chat_id имя",
-        reply_markup=types.ForceReply(selective=True)
+        message.chat.id,
+        "Введите ID и имя пользователя в формате: chat_id имя"
     )
     bot.register_next_step_handler(msg, add_user_by_text)
 
 def add_user_by_text(message):
     if not is_admin(message.from_user.id):
-        bot.reply_to(message, "Нет прав на добавление!")
-        return
+        return bot.reply_to(message, "Нет прав на добавление!")
     try:
         chat_id, name = message.text.split(maxsplit=1)
         users = get_allowed_users()
@@ -136,39 +122,114 @@ def add_user_by_text(message):
     except ValueError:
         bot.reply_to(message, "Ошибка формата. Используйте: chat_id имя")
     time.sleep(1)
-    send_main_menu(message.chat.id, message.from_user.id)
+    admin_panel(message)
 
+@bot.message_handler(func=lambda msg: msg.text == "Список пользователей")
+def show_user_list(message):
+    if not is_admin(message.from_user.id):
+        return bot.reply_to(message, "Нет доступа.")
+    users = get_allowed_users()
+    if not users:
+        text = "Список пользователей пуст."
+    else:
+        text = "📋 <b>Список пользователей:</b>\n"
+        for uid, name in users.items():
+            text += f"🆔 <code>{uid}</code> — {name}\n"
+    bot.send_message(message.chat.id, text, parse_mode='HTML')
 
-# --- НАЧАЛО ФОРМИРОВАНИЯ ОТЧЁТА ---
+# --- Новый код для удаления пользователя с инлайн-кнопками ---
 
-@bot.callback_query_handler(func=lambda call: call.data == 'report')
-def report_callback(call):
-    if not is_user_allowed(call.from_user.id):
-        bot.answer_callback_query(call.id, "Нет доступа!")
-        return send_main_menu(call.message.chat.id, call.from_user.id)
+@bot.message_handler(func=lambda msg: msg.text == "Удалить пользователя")
+def delete_user_request(message):
+    if not is_admin(message.from_user.id):
+        return bot.reply_to(message, "Нет доступа.")
+    
+    users = get_allowed_users()
+    if not users:
+        return bot.send_message(message.chat.id, "Список пользователей пуст.")
+    
+    markup = types.InlineKeyboardMarkup()
+    for uid, name in users.items():
+        button = types.InlineKeyboardButton(text=name, callback_data=f"del_select_{uid}")
+        markup.add(button)
+    
+    bot.send_message(message.chat.id, "Выбери пользователя для удаления:", reply_markup=markup)
 
-    uid = str(call.from_user.id)
-    user_data[uid] = {"photos": [], "comment": ""}
-    msg = bot.send_message(
-        call.message.chat.id,
-        "Какой объект (комментарий)?",
-        reply_markup=types.ForceReply(selective=True)
+@bot.callback_query_handler(func=lambda call: call.data.startswith("del_select_"))
+def confirm_delete_user(call):
+    if not is_admin(call.from_user.id):
+        bot.answer_callback_query(call.id, "Нет доступа.")
+        return
+    
+    user_id_to_delete = call.data[len("del_select_"):]
+    users = get_allowed_users()
+    user_name = users.get(user_id_to_delete, "Неизвестный пользователь")
+    
+    markup = types.InlineKeyboardMarkup()
+    markup.add(
+        types.InlineKeyboardButton(text="Да", callback_data=f"del_confirm_yes_{user_id_to_delete}"),
+        types.InlineKeyboardButton(text="Нет", callback_data="del_confirm_no")
     )
+    bot.edit_message_text(
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        text=f"Уверены, что хотите удалить пользователя '{user_name}'?",
+        reply_markup=markup
+    )
+    bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("del_confirm_"))
+def process_delete_confirmation(call):
+    if not is_admin(call.from_user.id):
+        bot.answer_callback_query(call.id, "Нет доступа.")
+        return
+    
+    if call.data == "del_confirm_no":
+        bot.edit_message_text(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            text="Удаление отменено."
+        )
+        bot.answer_callback_query(call.id)
+        return
+    
+    if call.data.startswith("del_confirm_yes_"):
+        user_id_to_delete = call.data[len("del_confirm_yes_"):]
+        users = get_allowed_users()
+        if user_id_to_delete in users:
+            user_name = users.pop(user_id_to_delete)
+            save_allowed_users(users)
+            bot.edit_message_text(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text=f"Пользователь '{user_name}' удалён."
+            )
+        else:
+            bot.edit_message_text(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text="Пользователь не найден."
+            )
+        bot.answer_callback_query(call.id)
+
+# ============ ОТЧЁТЫ ============
+
+@bot.message_handler(func=lambda msg: msg.text == "Сделать фотоотчёт")
+def report_start(message):
+    if not is_user_allowed(message.from_user.id):
+        return bot.reply_to(message, "Нет доступа.")
+    uid = str(message.from_user.id)
+    user_data[uid] = {"photos": [], "comment": ""}
+    msg = bot.send_message(message.chat.id, "Какой объект (комментарий)?")
     bot.register_next_step_handler(msg, handle_comment)
 
 def handle_comment(message):
     uid = str(message.from_user.id)
     user_data[uid]["comment"] = message.text
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("Завершить отчет", callback_data="finish"))
-    kb.add(types.InlineKeyboardButton("Отменить отчет", callback_data="cancel"))
-    bot.send_message(
-        message.chat.id,
-        'Теперь отправьте фото. Когда закончите, нажмите "Завершить отчет".',
-        reply_markup=kb
-    )
-
-# --- ПРИЁМ ФОТО ОТ ПОЛЬЗОВАТЕЛЯ ---
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add(types.KeyboardButton("Завершить отчёт"))
+    markup.add(types.KeyboardButton("Отменить отчёт"))
+    bot.send_message(message.chat.id, "Теперь отправь фото. Когда закончишь, нажми 'Завершить отчёт'.", reply_markup=markup)
 
 @bot.message_handler(content_types=['photo'])
 def handle_photo(message):
@@ -178,58 +239,39 @@ def handle_photo(message):
     file_id = message.photo[-1].file_id
     user_data[uid]["photos"].append(file_id)
 
-# --- ЗАВЕРШЕНИЕ ОТЧЁТА: ПЕРЕСЫЛКА + ОТДЕЛЬНЫЙ ПОТОК ДЛЯ СОХРАНЕНИЯ ---
-
-@bot.callback_query_handler(func=lambda call: call.data == 'finish')
-def finish_report(call):
-    bot.answer_callback_query(call.id)
-    uid = str(call.from_user.id)
-    if not is_user_allowed(call.from_user.id):
-        return send_main_menu(call.message.chat.id, call.from_user.id)
-
+@bot.message_handler(func=lambda msg: msg.text == "Завершить отчёт")
+def finish_report(message):
+    uid = str(message.from_user.id)
+    if not is_user_allowed(message.from_user.id):
+        return bot.reply_to(message, "Нет доступа.")
     photos = user_data[uid]["photos"]
     comment_raw = user_data[uid]["comment"]
     name_raw = get_user_name(uid)
-    chat_id_str = uid  # для формирования имён файлов
+    chat_id_str = uid
 
     if not photos:
-        bot.send_message(call.message.chat.id, "Вы не отправили ни одной фотографии.")
-        return
-
-    # --------------------------------------------------------
-    # 1) Пересылаем медиагруппами в канал (по 10 фото в группе)
-    # --------------------------------------------------------
+        return bot.send_message(message.chat.id, "Вы не отправили ни одной фотографии.")
+    
+    sending_msg = bot.send_message(message.chat.id, "Отправка...")
 
     caption = f"<b>Фотоотчёт от {name_raw}</b>\nКомментарий: {comment_raw}"
     chunk_size = 10
-
     for i in range(0, len(photos), chunk_size):
         group = photos[i:i + chunk_size]
         media_group = []
         for j, file_id in enumerate(group):
             if j == 0:
-                media_group.append(
-                    types.InputMediaPhoto(media=file_id, caption=caption, parse_mode='HTML')
-                )
+                media_group.append(types.InputMediaPhoto(media=file_id, caption=caption, parse_mode='HTML'))
             else:
                 media_group.append(types.InputMediaPhoto(media=file_id))
         bot.send_media_group(CHANNEL_ID, media_group)
 
-    # --------------------------------------------------------
-    # 2) Запускаем поток для скачивания и сохранения фото
-    # --------------------------------------------------------
-
     safe_user_name = sanitize_for_path(name_raw)
     safe_comment = sanitize_for_path(comment_raw)
     timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-
-    # Копируем список, чтобы очистить пользовательские данные и не блокировать основной поток
     photos_copy = list(photos)
-
-    # Очищаем данные пользователя, чтобы он мог начать новый отчёт сразу
     user_data[uid] = {"photos": [], "comment": ""}
 
-    # Запускаем поток
     t = threading.Thread(
         target=save_photos_thread,
         args=(photos_copy, safe_user_name, safe_comment, chat_id_str, timestamp),
@@ -237,20 +279,26 @@ def finish_report(call):
     )
     t.start()
 
-    bot.send_message(call.message.chat.id, "Отчёт отправлен в канал, сохранение началось в фоне.")
-    send_main_menu(call.message.chat.id, call.from_user.id)
+    bot.edit_message_text("Отчёт отправлен в канал.", chat_id=message.chat.id, message_id=sending_msg.message_id)
+    send_main_menu(message.chat.id, message.from_user.id)
 
-# --- ОТМЕНА ОТЧЁТА ---
+@bot.message_handler(func=lambda msg: msg.text == "Отменить отчёт")
+def cancel_report(message):
+    uid = str(message.from_user.id)
+    user_data[uid] = {"photos": [], "comment": ""}
+    bot.send_message(message.chat.id, "Отчёт отменён.")
+    send_main_menu(message.chat.id, message.from_user.id)
 
-@bot.callback_query_handler(func=lambda call: call.data == 'cancel')
-def cancel_report(call):
-    bot.answer_callback_query(call.id, "Отчёт отменён.")
-    user_data[str(call.from_user.id)] = {"photos": [], "comment": ""}
-    send_main_menu(call.message.chat.id, call.from_user.id)
+# ============ ОСТАЛЬНЫЕ ОБРАБОТЧИКИ ============
 
-# --- ЗАПУСК БОТА ---
+@bot.message_handler(func=lambda msg: True)
+def fallback(message):
+    send_main_menu(message.chat.id, message.from_user.id)
+
+# ============ ЗАПУСК БОТА ============
 
 if __name__ == '__main__':
-    os.makedirs(LOCAL_REPORTS_BASE, exist_ok=True)
-    bot.polling(none_stop=True)
-
+    if not os.path.exists(LOCAL_REPORTS_BASE):
+        os.makedirs(LOCAL_REPORTS_BASE)
+    print("Бот запущен.")
+    bot.infinity_polling()
